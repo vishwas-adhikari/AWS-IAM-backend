@@ -1,0 +1,17 @@
+# Core Framework
+django>=5.0
+djangorestframework
+django-cors-headers
+python-dotenv
+
+# AWS SDK
+boto3
+botocore
+
+# Graph & Analysis Logic
+networkx
+scipy
+
+# Utilities
+requests
+tzdata
