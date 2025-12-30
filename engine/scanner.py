@@ -1,4 +1,4 @@
-from engine import aws_wrapper, iam_normalize, graph_builder, risk_rules, remediation
+from engine import aws_wrapper, iam_normalize, graph_builder, risk_rules,remediation, notifier
 from core.models import Scan, Finding, GraphNode, GraphEdge
 from django.utils import timezone
 from datetime import datetime, timedelta, timezone as dt_timezone
@@ -169,6 +169,11 @@ def run_full_scan(access_key, secret_key):
     edge_objs = [GraphEdge(scan=scan, source=e['source'], target=e['target'], label=e['label']) for e in edges]
     GraphEdge.objects.bulk_create(edge_objs)
 
+    # --- SEND NOTIFICATION ---
+    try:
+        notifier.send_telegram_report(scan)
+    except Exception as e:
+        print(f"Notification Error: {e}")
     return scan
 
 def create_finding(scan_obj, rule_id, resource_name):
