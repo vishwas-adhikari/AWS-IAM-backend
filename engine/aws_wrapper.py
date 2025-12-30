@@ -15,7 +15,7 @@ def fetch_account_data(access_key, secret_key):
     Orchestrates the data collection:
     1. Verifies Identity (GetCallerIdentity)
     2. Downloads IAM snapshot (GetAccountAuthorizationDetails)
-    3. Checks Credential Report (for MFA/Unused Keys) - simplified for MVP
+    3. Fetches Password Policy (Safe Mode)
     """
     try:
         # 1. Verification & Account ID
@@ -31,22 +31,31 @@ def fetch_account_data(access_key, secret_key):
         # 2. Main IAM Dump (Users, Roles, Policies)
         iam = get_iam_client(access_key, secret_key)
         
-        # This single API call is powerful: it gets almost everything we need.
-        # We filter for Users, Roles, and LocalManagedPolicies.
         print(f"Scanning Account: {account_id}...")
         auth_details = iam.get_account_authorization_details(
             Filter=['User', 'Role', 'LocalManagedPolicy']
         )
 
-        # 3. Get Password Policy (Check for MFA enforcement usually done here or via report)
-        # For MVP we will rely on User attributes from auth_details
+        # 3. Get Password Policy (Safely)
+        # We initialize it as empty first so the variable always exists
+        password_policy = {} 
+        try:
+            # Try to fetch the real policy
+            response = iam.get_account_password_policy()
+            password_policy = response.get('PasswordPolicy', {})
+        except ClientError:
+            # If no policy exists, AWS throws an error. We catch it and move on.
+            print("No password policy found (or permission denied). Using default.")
+            pass
 
+        # 4. Return everything
         return {
             "account_id": account_id,
             "account_arn": arn,
             "users": auth_details.get('UserDetailList', []),
             "roles": auth_details.get('RoleDetailList', []),
-            "policies": auth_details.get('Policies', [])
+            "policies": auth_details.get('Policies', []),
+            "password_policy": password_policy 
         }
 
     except ClientError as e:

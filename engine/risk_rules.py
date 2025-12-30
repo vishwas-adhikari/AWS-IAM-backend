@@ -1,10 +1,5 @@
-"""
-RISK_RULES defines the knowledge base for the scanner.
-It maps internal Rule IDs to human-readable Titles, Severities, and Fixes.
-"""
-
 RISK_RULES = {
-    # CRITICAL RISKS
+    # --- CRITICAL RISKS ---
     "ADMIN_ACCESS": {
         "title": "Full Administrator Access",
         "severity": "CRITICAL",
@@ -26,43 +21,62 @@ RISK_RULES = {
         "description": "A low-privilege identity can assume a high-privilege role to indirectly gain Admin access.",
         "remediation": "Remove sts:AssumeRole permissions from the starting user or add restrictive Conditions to the target role's Trust Policy."
     },
+    # NEW: Root Usage
+    "ROOT_USAGE": {
+        "title": "Root Account Recently Used",
+        "severity": "CRITICAL",
+        "category": "Security Hygiene",
+        "description": "The Root account credential has been used recently. Root should be locked away and only used for billing/emergency.",
+        "remediation": "Stop using Root for daily tasks. Create IAM Users or use Identity Center."
+    },
 
-    # HIGH RISKS
+    # --- HIGH RISKS ---
     "WILDCARD_PERMISSION": {
         "title": "Broad Wildcard Permissions",
         "severity": "HIGH",
         "category": "Excessive Permissions",
-        "description": "Policy contains 'Action': '*' on 'Resource': '*'. This is insecure practice.",
-        "remediation": "Scope down permissions. List specific Actions (e.g., s3:ListBucket) and specific Resources."
+        "description": "Policy contains broad service wildcards (e.g., 's3:*' or 'ec2:*') on all resources.",
+        "remediation": "Scope down permissions. List specific Actions and Resources."
     },
-    "MFA_MISSING": {
-        "title": "MFA Not Enabled on Admin",
+    # NEW: Admin without MFA
+    "NO_MFA_ADMIN": {
+        "title": "Admin Access without MFA",
         "severity": "HIGH",
         "category": "Security Hygiene",
-        "description": "User has elevated privileges but does not have MFA enabled.",
-        "remediation": "Enforce MFA using the 'aws:MultiFactorAuthPresent' condition in IAM policies."
+        "description": "User has Administrator privileges but Multi-Factor Authentication (MFA) is not enabled.",
+        "remediation": "Enable MFA immediately. Enforce MFA via IAM Policy Condition 'aws:MultiFactorAuthPresent'."
     },
-    "ROOT_USAGE": {
-        "title": "Root Account Active",
+    # NEW: Dangerous IAM Actions
+    "PRIV_ESC_ACTIONS": {
+        "title": "Dangerous IAM Write Actions",
+        "severity": "HIGH",
+        "category": "Privilege Escalation",
+        "description": "User can create or attach policies (iam:CreatePolicy, iam:AttachUserPolicy). This allows them to grant themselves Admin rights.",
+        "remediation": "Restrict these actions to specific Administrators only."
+    },
+    # NEW: Old Keys
+    "LONG_LIVED_KEYS": {
+        "title": "Old Access Keys (>90 Days)",
         "severity": "HIGH",
         "category": "Security Hygiene",
-        "description": "The Root account access keys have been used recently. Root should only be used for billing/account recovery.",
-        "remediation": "Delete Root access keys. Use IAM Users or Identity Center for daily tasks."
+        "description": "Access Key is older than 90 days. Old keys are more likely to be leaked or compromised.",
+        "remediation": "Rotate access keys regularly. Deactivate and delete this key."
     },
 
-    # MEDIUM RISKS
-    "UNUSED_ACCESS_KEY": {
-        "title": "Unused Access Key",
-        "severity": "MEDIUM",
-        "category": "Security Hygiene",
-        "description": "Access Key has not been used in >90 days.",
-        "remediation": "Deactivate or delete the inactive access key."
-    },
+    # --- MEDIUM RISKS ---
     "PASSROLE_ANY": {
         "title": "PassRole to Any Resource",
         "severity": "MEDIUM",
         "category": "Excessive Permissions",
-        "description": "Policy allows iam:PassRole on Resource: *. This allows passing roles to services (like EC2) potentially granting their permissions.",
-        "remediation": "Restrict iam:PassRole to specific Role ARNs in the Resource field."
+        "description": "Policy allows 'iam:PassRole' on '*'. Allows passing roles to services to pivot access.",
+        "remediation": "Restrict iam:PassRole to specific Role ARNs."
+    },
+    # NEW: Password Policy
+    "PASSWORD_POLICY_WEAK": {
+        "title": "Weak Password Policy",
+        "severity": "MEDIUM",
+        "category": "Misconfiguration",
+        "description": "Account password policy does not require enough complexity or rotation.",
+        "remediation": "Update IAM Password Policy to require symbols, numbers, and minimum length of 14."
     }
 }
