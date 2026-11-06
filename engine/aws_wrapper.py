@@ -3,6 +3,7 @@ import io
 import time
 
 import boto3
+from botocore import exceptions as botocore_exceptions
 from botocore.exceptions import ClientError
 
 # Every call below is covered by the AWS-managed SecurityAudit policy
@@ -12,19 +13,63 @@ CREDENTIAL_REPORT_MAX_ATTEMPTS = 10
 CREDENTIAL_REPORT_RETRY_SECONDS = 2
 
 
-def get_session(access_key, secret_key, session_token=None):
-    """Creates a Boto3 session. session_token is required for temporary STS credentials."""
-    return boto3.Session(
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        aws_session_token=session_token or None,
-        region_name='us-east-1'  # IAM is global, but boto3 needs a region
-    )
+# --- Errors the API layer can turn into clean messages ---
+
+class AWSScanError(Exception):
+    """Base class for AWS problems that stop a scan. The message is safe to show users."""
 
 
-def get_iam_client(access_key, secret_key, session_token=None):
-    """Creates a Boto3 IAM client using provided credentials."""
-    return get_session(access_key, secret_key, session_token).client('iam')
+class ProfileNotFoundError(AWSScanError):
+    pass
+
+
+class InvalidCredentialsError(AWSScanError):
+    pass
+
+
+class AccessDeniedError(AWSScanError):
+    pass
+
+
+# Raised while botocore loads credentials (missing, incomplete, expired SSO session, ...)
+CREDENTIAL_LOAD_ERRORS = (
+    botocore_exceptions.NoCredentialsError,
+    botocore_exceptions.PartialCredentialsError,
+    botocore_exceptions.CredentialRetrievalError,
+    botocore_exceptions.TokenRetrievalError,
+    botocore_exceptions.SSOTokenLoadError,
+    botocore_exceptions.UnauthorizedSSOTokenError,
+)
+# ClientError codes AWS returns for bad, expired or unknown credentials
+INVALID_CREDENTIAL_CODES = {
+    'InvalidClientTokenId', 'SignatureDoesNotMatch', 'ExpiredToken', 'ExpiredTokenException',
+    'UnrecognizedClientException', 'InvalidAccessKeyId', 'AuthFailure',
+}
+ACCESS_DENIED_CODES = {'AccessDenied', 'AccessDeniedException', 'UnauthorizedOperation'}
+
+
+def list_profiles():
+    """Names of the AWS profiles configured on this machine (no credentials)."""
+    return sorted(boto3.Session().available_profiles)
+
+
+def get_session(profile=None):
+    """
+    Creates a Boto3 session from a named profile in ~/.aws/config / ~/.aws/credentials,
+    or from the default credential chain (env vars, instance role, ...) when profile is None.
+    """
+    try:
+        return boto3.Session(
+            profile_name=profile or None,
+            region_name='us-east-1'  # IAM is global, but boto3 needs a region
+        )
+    except botocore_exceptions.ProfileNotFound as e:
+        raise ProfileNotFoundError(f"AWS profile '{profile}' was not found.") from e
+
+
+def get_iam_client(profile=None):
+    """Creates a Boto3 IAM client for the given profile (or the default credential chain)."""
+    return get_session(profile).client('iam')
 
 
 def fetch_authorization_details(iam):
@@ -140,7 +185,7 @@ def fetch_account_summary(iam):
         return {}
 
 
-def fetch_account_data(access_key, secret_key, session_token=None):
+def fetch_account_data(profile=None):
     """
     Orchestrates the data collection:
     1. Verifies Identity (GetCallerIdentity)
@@ -151,7 +196,7 @@ def fetch_account_data(access_key, secret_key, session_token=None):
        (plus ListMFADevices for any user the report doesn't cover)
     """
     try:
-        session = get_session(access_key, secret_key, session_token)
+        session = get_session(profile)
 
         # 1. Verification & Account ID
         caller_id = session.client('sts').get_caller_identity()
@@ -205,9 +250,14 @@ def fetch_account_data(access_key, secret_key, session_token=None):
             "account_summary": account_summary
         }
 
+    except CREDENTIAL_LOAD_ERRORS as e:
+        raise InvalidCredentialsError("AWS credentials are missing, incomplete or expired.") from e
     except ClientError as e:
-        print(f"AWS Error: {e}")
-        raise Exception(f"Failed to connect to AWS: {str(e)}")
-    except Exception as e:
-        print(f"General Error: {e}")
-        raise Exception(f"Scan failed: {str(e)}")
+        code = e.response.get('Error', {}).get('Code')
+        if code in INVALID_CREDENTIAL_CODES:
+            raise InvalidCredentialsError("AWS rejected the credentials (invalid or expired).") from e
+        if code in ACCESS_DENIED_CODES:
+            raise AccessDeniedError(
+                "Access denied. The credentials need the AWS-managed SecurityAudit policy."
+            ) from e
+        raise

@@ -17,7 +17,7 @@ NO_MFA_TITLE = "Admin Access without MFA"
 def run_scan(data):
     with mock.patch.object(scanner.aws_wrapper, "fetch_account_data", return_value=data), \
          mock.patch.object(scanner.notifier, "send_telegram_report"):
-        scan = scanner.run_full_scan("key", "secret", "token")
+        scan = scanner.run_full_scan("test-profile")
     return list(Finding.objects.filter(scan=scan).values_list("affected_resource", "title"))
 
 
@@ -93,7 +93,7 @@ class GraphRiskTests(TestCase):
         )
         with mock.patch.object(scanner.aws_wrapper, "fetch_account_data", return_value=data), \
              mock.patch.object(scanner.notifier, "send_telegram_report"):
-            scan = scanner.run_full_scan("key", "secret")
+            scan = scanner.run_full_scan()
 
         risk = dict(GraphNode.objects.filter(scan=scan).values_list("node_id", "risk_level"))
         self.assertEqual(risk["arn:aws:iam::111111111111:user/admin"], "CRITICAL")
@@ -107,7 +107,7 @@ class FindingFieldsTests(TestCase):
         data = account_data(users=[user("admin", managed=[ADMIN_ARN])], credential_report=[report_row("admin", True)])
         with mock.patch.object(scanner.aws_wrapper, "fetch_account_data", return_value=data), \
              mock.patch.object(scanner.notifier, "send_telegram_report"):
-            scan = scanner.run_full_scan("key", "secret")
+            scan = scanner.run_full_scan()
 
         finding = Finding.objects.get(scan=scan, affected_resource="admin")
         self.assertEqual(finding.rule_id, "ADMIN_ACCESS")

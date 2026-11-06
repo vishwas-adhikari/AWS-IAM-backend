@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 PRIV_ESC_ACTIONS = ['iam:CreatePolicy', 'iam:AttachUserPolicy', 'iam:PutUserPolicy', 'iam:CreateAccessKey']
 
-def run_full_scan(access_key, secret_key, session_token=None):
+def run_full_scan(profile=None):
     # 1. Fetch Data
-    data = aws_wrapper.fetch_account_data(access_key, secret_key, session_token)
+    data = aws_wrapper.fetch_account_data(profile)
     
     # 2. Create Scan Record
     scan = Scan.objects.create(
