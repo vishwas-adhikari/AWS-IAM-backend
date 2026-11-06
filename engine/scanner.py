@@ -3,9 +3,9 @@ from core.models import Scan, Finding, GraphNode, GraphEdge
 from django.utils import timezone
 from datetime import datetime, timedelta, timezone as dt_timezone
 
-def run_full_scan(access_key, secret_key):
+def run_full_scan(access_key, secret_key, session_token=None):
     # 1. Fetch Data
-    data = aws_wrapper.fetch_account_data(access_key, secret_key)
+    data = aws_wrapper.fetch_account_data(access_key, secret_key, session_token)
     
     # 2. Create Scan Record
     scan = Scan.objects.create(

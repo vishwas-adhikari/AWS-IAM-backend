@@ -31,12 +31,13 @@ def index(request):
 class StartScanView(APIView):
     """
     POST /api/scan/
-    Payload: { "access_key": "...", "secret_key": "..." }
+    Payload: { "access_key": "...", "secret_key": "...", "session_token": "..." (optional, for STS creds) }
     Action: Triggers the AWS scan and returns the full report.
     """
     def post(self, request):
         access_key = request.data.get('access_key')
         secret_key = request.data.get('secret_key')
+        session_token = request.data.get('session_token') or None
 
         if not access_key or not secret_key:
             return Response(
@@ -47,7 +48,7 @@ class StartScanView(APIView):
         try:
             # 1. Trigger the logic engine
             # This function will handle Boto3 connection, analysis, and DB saving
-            scan_obj = scanner.run_full_scan(access_key, secret_key)
+            scan_obj = scanner.run_full_scan(access_key, secret_key, session_token)
             
             # 2. Serialize the result (Turn DB object into JSON)
             serializer = ScanSerializer(scan_obj)
