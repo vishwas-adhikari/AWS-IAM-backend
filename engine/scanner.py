@@ -1,7 +1,9 @@
-from engine import aws_wrapper, iam_normalize, graph_builder, risk_rules,remediation, notifier
+from engine import aws_wrapper, iam_normalize, graph_builder, risk_rules,remediation, notifier, policy_engine
 from core.models import Scan, Finding, GraphNode, GraphEdge
 from django.utils import timezone
 from datetime import datetime, timedelta, timezone as dt_timezone
+
+PRIV_ESC_ACTIONS = ['iam:CreatePolicy', 'iam:AttachUserPolicy', 'iam:PutUserPolicy', 'iam:CreateAccessKey']
 
 def run_full_scan(access_key, secret_key, session_token=None):
     # 1. Fetch Data
@@ -17,44 +19,57 @@ def run_full_scan(access_key, secret_key, session_token=None):
     )
 
     findings_list = []
-    
-    # --- HELPER: Policy Analysis ---
-    def check_policy_risk(policy_doc):
-        statements = iam_normalize.normalize_policy_document(policy_doc)
+    seen_findings = set()  # (rule_id, node) - one finding per pair
+    finding_nodes = []     # (finding, graph node_id) - for colouring the graph
+
+    def add_finding(rule_id, resource_name, node_id=None):
+        key = (rule_id, node_id or resource_name)
+        if key in seen_findings:
+            return
+        seen_findings.add(key)
+        finding = create_finding(scan, rule_id, resource_name)
+        findings_list.append(finding)
+        if node_id:
+            finding_nodes.append((finding, node_id))
+
+    engine = policy_engine.PolicyEngine(data)
+
+    # --- HELPER: Effective Permission Analysis ---
+    def check_principal_risk(principal):
+        """Returns the permission rule IDs triggered by a user's or role's effective permissions."""
+        # 1. CRITICAL: Admin Access (any policy granting *:*, from any source)
+        if engine.is_admin(principal):
+            return ["ADMIN_ACCESS"]
+
         risks_found = []
 
-        for stmt in statements:
-            if stmt.get('Effect') != 'Allow': continue
-            
-            actions = stmt.get('Action', [])
-            if isinstance(actions, str): actions = [actions]
-            
-            resources = stmt.get('Resource', [])
-            if isinstance(resources, str): resources = [resources]
+        # 2. HIGH: Dangerous IAM Write Actions (even when scoped, e.g. to their own user)
+        if any(engine.allows_on_any_resource(principal, a) for a in PRIV_ESC_ACTIONS):
+            risks_found.append("PRIV_ESC_ACTIONS")
 
-            # 1. CRITICAL: Admin Access
-            if ('*' in actions) and ('*' in resources):
-                risks_found.append("ADMIN_ACCESS")
-                continue 
+        # 3. HIGH: Service-wide wildcards on all resources
+        if engine.service_wildcards(principal):
+            risks_found.append("WILDCARD_PERMISSION")
 
-            # 2. HIGH: Dangerous IAM Write Actions
-            dangerous_actions = ['iam:CreatePolicy', 'iam:AttachUserPolicy', 'iam:PutUserPolicy', 'iam:CreateAccessKey']
-            for da in dangerous_actions:
-                if da in actions or '*' in actions:
-                    risks_found.append("PRIV_ESC_ACTIONS")
-                    break
+        # 4. MEDIUM: PassRole on any role
+        if engine.allows(principal, 'iam:PassRole', '*'):
+            risks_found.append("PASSROLE_ANY")
 
-            # 3. HIGH: Wildcards
-            for action in actions:
-                if action != '*' and action.endswith(':*') and ('*' in resources):
-                    risks_found.append("WILDCARD_PERMISSION")
-                    break
+        return risks_found
 
-            # 4. MEDIUM: PassRole
-            if ('iam:PassRole' in actions) and ('*' in resources):
-                risks_found.append("PASSROLE_ANY")
-        
-        return list(set(risks_found))
+    # --- HELPER: MFA Status ---
+    report_mfa = {
+        row['user']: row.get('mfa_active', '').lower() == 'true'
+        for row in data.get('credential_report', []) if row.get('user')
+    }
+    mfa_devices = data.get('mfa_devices', {})
+
+    def user_has_mfa(user_name):
+        """True/False from the credential report, else ListMFADevices; None if unknown."""
+        if user_name in report_mfa:
+            return report_mfa[user_name]
+        devices = mfa_devices.get(user_name)
+        return None if devices is None else len(devices) > 0
 
     # --- ANALYSIS PHASE ---
 
@@ -63,13 +78,13 @@ def run_full_scan(access_key, secret_key, session_token=None):
     # Example check: minimum length < 14
     if not pp or pp.get('MinimumPasswordLength', 0) < 14:
         # Note: We assign this finding to a placeholder "Account-Settings" resource
-        findings_list.append(create_finding(scan, "PASSWORD_POLICY_WEAK", "IAM-Password-Policy"))
+        add_finding("PASSWORD_POLICY_WEAK", "IAM-Password-Policy")
 
     # B. Check Users
     for user in data['users']:
         user_name = user['UserName']
-        user_is_admin = False
-        
+        user_arn = engine.get(user).arn
+
         # Check Keys Age
         for key in user.get('AccessKeyMetadata', []): # Boto3 usually returns this separately, but AuthorizationDetails includes it inside UserDetailList sometimes? 
         # Actually, get_account_authorization_details structure for keys is inside 'UserPolicyList'? No.
@@ -79,30 +94,16 @@ def run_full_scan(access_key, secret_key, session_token=None):
         # OR better: Skip key check if data isn't present to avoid crashing.
             pass 
 
-        # 1. Check Permissions
-        all_risks = []
-        
-        # Managed Policies
-        for policy in user.get('AttachedManagedPolicies', []):
-            if policy['PolicyName'] == 'AdministratorAccess':
-                all_risks.append("ADMIN_ACCESS")
-                user_is_admin = True
-        
-        # Inline Policies
-        for policy in user.get('UserPolicyList', []):
-            risks = check_policy_risk(policy['PolicyDocument'])
-            all_risks.extend(risks)
-            if "ADMIN_ACCESS" in risks: user_is_admin = True
+        # 1. Check Permissions (inline + managed + group policies combined)
+        all_risks = check_principal_risk(user)
+        user_is_admin = "ADMIN_ACCESS" in all_risks
 
-        # Deduplicate and Add Findings
-        for risk in set(all_risks):
-            findings_list.append(create_finding(scan, risk, user_name))
+        for risk in all_risks:
+            add_finding(risk, user_name, user_arn)
 
-        # 2. Check MFA for Admins
-        # 'MFADevices' list is present if MFA is enabled
-        has_mfa = len(user.get('MFADevices', [])) > 0
-        if user_is_admin and not has_mfa:
-            findings_list.append(create_finding(scan, "NO_MFA_ADMIN", user_name))
+        # 2. Check MFA for Admins (skipped when MFA status couldn't be determined)
+        if user_is_admin and user_has_mfa(user_name) is False:
+            add_finding("NO_MFA_ADMIN", user_name, user_arn)
 
         # 3. Check Root Usage (If this user object is actually the root account summary, which sometimes happens in reports)
         if user_name == '<root_account>': 
@@ -112,34 +113,29 @@ def run_full_scan(access_key, secret_key, session_token=None):
     # C. Check Roles
     for role in data['roles']:
         role_name = role['RoleName']
-        
+        role_arn = engine.get(role).arn
+
         # Trust Policy
         trust_doc = role.get('AssumeRolePolicyDocument', {})
         principals = iam_normalize.get_trust_principals(trust_doc)
         if '*' in principals:
-            findings_list.append(create_finding(scan, "PUBLIC_ASSUME_ROLE", role_name))
+            add_finding("PUBLIC_ASSUME_ROLE", role_name, role_arn)
 
-        # Role Permissions
-        for policy in role.get('RolePolicyList', []):
-            risks = check_policy_risk(policy['PolicyDocument'])
-            for r in risks:
-                findings_list.append(create_finding(scan, r, role_name))
+        # Role Permissions (inline + managed combined)
+        for risk in check_principal_risk(role):
+            add_finding(risk, role_name, role_arn)
 
     # D. Build Graph
     graph_engine = graph_builder.IAMGraph()
-    graph_engine.build_from_data(data['users'], data['roles'])
+    graph_engine.build_from_data(data['users'], data['roles'], data['account_id'], engine)
     nodes, edges = graph_engine.get_nodes_and_edges()
 
     # --- MAP RISKS TO NODES ---
+    risk_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
     risk_map = {}
-    for f in findings_list:
-        current_risk = risk_map.get(f.affected_resource, "LOW")
-        if f.severity == "CRITICAL":
-            risk_map[f.affected_resource] = "CRITICAL"
-        elif f.severity == "HIGH" and current_risk != "CRITICAL":
-            risk_map[f.affected_resource] = "HIGH"
-        elif f.severity == "MEDIUM" and current_risk not in ["CRITICAL", "HIGH"]:
-            risk_map[f.affected_resource] = "MEDIUM"
+    for f, node_id in finding_nodes:
+        if risk_rank.get(f.severity, 0) > risk_rank[risk_map.get(node_id, "LOW")]:
+            risk_map[node_id] = f.severity
 
     # --- SAVING ---
     Finding.objects.bulk_create(findings_list)
@@ -160,7 +156,8 @@ def run_full_scan(access_key, secret_key, session_token=None):
     # Save Nodes
     node_objs = []
     for n in nodes:
-        calculated_risk = risk_map.get(n['id'], "LOW")
+        # Graph-assigned risk (e.g. the public "*" node) is a floor
+        calculated_risk = max(risk_map.get(n['id'], "LOW"), n['risk'], key=lambda r: risk_rank.get(r, 0))
         node_objs.append(GraphNode(
             scan=scan, node_id=n['id'], label=n['label'], type=n['type'], risk_level=calculated_risk
         ))

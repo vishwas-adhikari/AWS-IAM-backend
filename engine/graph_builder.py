@@ -1,7 +1,21 @@
+import re
+
 import networkx as nx
-from engine.iam_normalize import get_trust_principals
+from engine.iam_normalize import get_trust_principal_entries
+
+PUBLIC_NODE_ID = "*"
+ACCOUNT_ID_RE = re.compile(r'^\d{12}$')
+# arn:partition:service::account:resource
+ARN_RE = re.compile(r'^arn:([^:]+):([^:]+):[^:]*:(\d{12}):(.+)$')
+
 
 class IAMGraph:
+    """
+    Node IDs are ARNs (or the service / federated provider / "*" string for
+    non-IAM principals), so same-named entities in different accounts or of
+    different kinds never merge. Labels are the short display names.
+    """
+
     def __init__(self):
         self.graph = nx.DiGraph()
         self.existing_nodes = set()
@@ -16,58 +30,103 @@ class IAMGraph:
         """Adds a relationship."""
         # Ensure both nodes exist before adding edge to avoid errors
         if source not in self.existing_nodes:
-            # If source is missing (e.g. external account), create a placeholder
             self.add_node(source, label=source, type="UNKNOWN", risk="LOW")
-        
+
         if target not in self.existing_nodes:
             self.add_node(target, label=target, type="UNKNOWN", risk="LOW")
 
         self.graph.add_edge(source, target, label=label)
 
-    def build_from_data(self, users, roles):
+    def build_from_data(self, users, roles, account_id, engine=None):
         """
         Parses AWS data and constructs the graph nodes and edges.
+        `engine` (a policy_engine.PolicyEngine) is used to resolve who can assume
+        roles that trust the account root; without it those edges are skipped.
         """
+        self.account_id = account_id
+        self.engine = engine
+        self.local_principals = []  # (node_id, user/role detail)
+        self.local_role_ids = {}    # role name -> node_id
+
         # 1. Add All Local Users First (So we know who exists)
         for user in users:
-            user_name = user.get('UserName')
-            self.add_node(user_name, label=user_name, type="USER", risk="LOW")
+            node_id = user.get('Arn') or f"arn:aws:iam::{account_id}:user/{user['UserName']}"
+            self.add_node(node_id, label=user['UserName'], type="USER", risk="LOW")
+            self.local_principals.append((node_id, user))
 
-        # 2. Add Roles and Analyze Trust Policies
+        # 2. Add Roles
         for role in roles:
-            role_name = role.get('RoleName')
-            self.add_node(role_name, label=role_name, type="ROLE", risk="LOW")
-            
-            # Check Trust Policy (Who can assume this role?)
+            node_id = role.get('Arn') or f"arn:aws:iam::{account_id}:role/{role['RoleName']}"
+            self.add_node(node_id, label=role['RoleName'], type="ROLE", risk="LOW")
+            self.local_principals.append((node_id, role))
+            self.local_role_ids[role['RoleName']] = node_id
+
+        # 3. Analyze Trust Policies (Who can assume each role?)
+        for role in roles:
+            role_id = self.local_role_ids[role['RoleName']]
             trust_doc = role.get('AssumeRolePolicyDocument', {})
-            principals = get_trust_principals(trust_doc)
-            
-            for p in principals:
-                if p == '*':
-                    # Case A: Public Access
-                    source_id = "The Internet (Public)"
-                    self.add_node(source_id, label="The Internet", type="GROUP", risk="CRITICAL")
-                    self.add_edge(source_id, role_name, label="CAN_ASSUME")
-                
-                elif isinstance(p, str) and "arn:aws" in p:
-                    # Case B: Specific ARN (User or Role)
-                    # p example: "arn:aws:iam::123456789:user/Intern-Dave"
-                    
-                    # Extract the name part
-                    if "/" in p:
-                        source_name = p.split('/')[-1] # "Intern-Dave"
-                    elif ":" in p:
-                        source_name = p.split(':')[-1] # "root" or other
-                    else:
-                        source_name = p
+            for principal_type, value in get_trust_principal_entries(trust_doc):
+                if principal_type == 'Service':
+                    self.add_node(value, label=value, type="SERVICE")
+                    self.add_edge(value, role_id, label="CAN_ASSUME")
+                elif principal_type == 'Federated':
+                    self.add_node(value, label=value.split('/')[-1], type="FEDERATED")
+                    self.add_edge(value, role_id, label="CAN_ASSUME")
+                else:
+                    self._add_aws_trust(value, role_id)
 
-                    # Add Edge
-                    self.add_edge(source_name, role_name, label="CAN_ASSUME")
+    def _add_aws_trust(self, principal, role_id):
+        # Case A: Public Access
+        if principal == '*':
+            self.add_node(PUBLIC_NODE_ID, label="Anyone (Public)", type="PUBLIC", risk="CRITICAL")
+            self.add_edge(PUBLIC_NODE_ID, role_id, label="CAN_ASSUME")
+            return
 
-                elif isinstance(p, str) and "root" in p:
-                     # Case C: Account Root Trust
-                     # This creates a node for the account root
-                     self.add_edge("Account-Root", role_name, label="TRUSTS")
+        # A bare account ID means that account's root
+        if ACCOUNT_ID_RE.match(principal):
+            principal = f"arn:aws:iam::{principal}:root"
+
+        match = ARN_RE.match(principal)
+        if not match:
+            # e.g. the unique ID AWS leaves behind when a trusted principal is deleted
+            self.add_node(principal, label=principal, type="UNKNOWN")
+            self.add_edge(principal, role_id, label="CAN_ASSUME")
+            return
+
+        service, account, resource = match.group(2), match.group(3), match.group(4)
+
+        # Case B: Another account (its root, or a specific user/role in it)
+        if account != self.account_id:
+            if resource == 'root':
+                label = f"Account {account}"
+            else:
+                label = f"{resource.split('/')[-1]} ({account})"
+            self.add_node(principal, label=label, type="EXTERNAL_ACCOUNT")
+            self.add_edge(principal, role_id, label="CAN_ASSUME")
+            return
+
+        # Case C: Same-account root - the account delegates to IAM, so only
+        # principals whose own policies allow sts:AssumeRole on this role can assume it
+        if resource == 'root':
+            self.add_node(principal, label="Account Root", type="ACCOUNT_ROOT")
+            self.add_edge(principal, role_id, label="TRUSTS")
+            if self.engine:
+                for source_id, detail in self.local_principals:
+                    if source_id != role_id and self.engine.allows(detail, 'sts:AssumeRole', role_id):
+                        self.add_edge(source_id, role_id, label="CAN_ASSUME")
+            return
+
+        # Case D: Specific same-account user/role - trusted directly
+        if service == 'sts' and resource.startswith('assumed-role/'):
+            # arn:aws:sts::acct:assumed-role/RoleName/session -> the role itself
+            role_name = resource.split('/')[1]
+            source_id = self.local_role_ids.get(role_name, principal)
+            self.add_node(source_id, label=role_name, type="ROLE")
+        else:
+            kind = "USER" if resource.startswith('user/') else "ROLE" if resource.startswith('role/') else "UNKNOWN"
+            source_id = principal
+            self.add_node(source_id, label=resource.split('/')[-1], type=kind)
+        self.add_edge(source_id, role_id, label="CAN_ASSUME")
 
     def get_nodes_and_edges(self):
         """
@@ -81,7 +140,7 @@ class IAMGraph:
                 "type": data.get("type", "UNKNOWN"),
                 "risk": data.get("risk", "LOW")
             })
-            
+
         edges = []
         for u, v, data in self.graph.edges(data=True):
             edges.append({
@@ -89,5 +148,5 @@ class IAMGraph:
                 "target": v,
                 "label": data.get("label", "RELATED")
             })
-            
+
         return nodes, edges

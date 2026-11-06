@@ -111,6 +111,26 @@ def fetch_credential_report(iam):
     return []
 
 
+def fetch_mfa_devices(iam, user_names):
+    """
+    Fallback for users missing from the credential report.
+    Returns {user_name: [serial, ...]}, or None for a user whose devices couldn't be listed.
+    """
+    devices = {}
+    paginator = iam.get_paginator('list_mfa_devices')
+    for user_name in user_names:
+        try:
+            devices[user_name] = [
+                d['SerialNumber']
+                for page in paginator.paginate(UserName=user_name)
+                for d in page.get('MFADevices', [])
+            ]
+        except ClientError as e:
+            print(f"Could not list MFA devices for {user_name}: {e}")
+            devices[user_name] = None
+    return devices
+
+
 def fetch_account_summary(iam):
     """Returns the IAM account summary map (includes AccountMFAEnabled, AccountAccessKeysPresent)."""
     try:
@@ -128,6 +148,7 @@ def fetch_account_data(access_key, secret_key, session_token=None):
     3. Resolves attached managed policy documents (GetPolicy + GetPolicyVersion)
     4. Fetches Password Policy (Safe Mode)
     5. Fetches Credential Report and Account Summary
+       (plus ListMFADevices for any user the report doesn't cover)
     """
     try:
         session = get_session(access_key, secret_key, session_token)
@@ -162,6 +183,13 @@ def fetch_account_data(access_key, secret_key, session_token=None):
         credential_report = fetch_credential_report(iam)
         account_summary = fetch_account_summary(iam)
 
+        # Users the report doesn't cover (report missing, or user newer than the report)
+        reported_users = {row.get('user') for row in credential_report}
+        mfa_devices = fetch_mfa_devices(iam, [
+            u['UserName'] for u in auth_details.get('UserDetailList', [])
+            if u['UserName'] not in reported_users
+        ])
+
         # 6. Return everything
         return {
             "account_id": account_id,
@@ -173,6 +201,7 @@ def fetch_account_data(access_key, secret_key, session_token=None):
             "managed_policies": managed_policies,
             "password_policy": password_policy,
             "credential_report": credential_report,
+            "mfa_devices": mfa_devices,
             "account_summary": account_summary
         }
 

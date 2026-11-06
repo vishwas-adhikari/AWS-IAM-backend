@@ -23,35 +23,42 @@ def normalize_policy_document(policy_doc):
         
     return statements
 
+TRUST_PRINCIPAL_TYPES = ('AWS', 'Service', 'Federated')
+
+def get_trust_principal_entries(trust_policy):
+    """
+    Extracts who can assume a role from its Trust Policy.
+    Returns a list of (type, value) pairs, type being 'AWS', 'Service' or 'Federated'.
+    "Principal": "*" (plain string) is returned as ('AWS', '*').
+    """
+    statements = normalize_policy_document(trust_policy)
+    entries = []
+
+    for stmt in statements:
+        if stmt.get('Effect') != 'Allow':
+            continue
+        principal_block = stmt.get('Principal', {})
+
+        # Handle "Principal": "*" - anyone
+        if isinstance(principal_block, str):
+            entries.append(('AWS', principal_block))
+            continue
+
+        # Handle "AWS"/"Service"/"Federated": "value" or ["value", ...]
+        for principal_type in TRUST_PRINCIPAL_TYPES:
+            values = principal_block.get(principal_type, [])
+            if isinstance(values, str):
+                values = [values]
+            entries.extend((principal_type, v) for v in values)
+
+    return entries
+
 def get_trust_principals(trust_policy):
     """
     Extracts who can assume a role from its Trust Policy.
-    Returns a list of Principals (ARNs, Services, or '*').
+    Returns a list of Principals (ARNs, account IDs, Services, Federated providers, or '*').
     """
-    statements = normalize_policy_document(trust_policy)
-    principals = []
-    
-    for stmt in statements:
-        if stmt.get('Effect') == 'Allow':
-            principal_block = stmt.get('Principal', {})
-            
-            # Handle "AWS": "arn:..." or "AWS": ["arn:...", "arn:..."]
-            if 'AWS' in principal_block:
-                aws_princ = principal_block['AWS']
-                if isinstance(aws_princ, list):
-                    principals.extend(aws_princ)
-                else:
-                    principals.append(aws_princ)
-            
-            # Handle Service Principals (e.g., ec2.amazonaws.com)
-            if 'Service' in principal_block:
-                svc_princ = principal_block['Service']
-                if isinstance(svc_princ, list):
-                    principals.extend(svc_princ)
-                else:
-                    principals.append(svc_princ)
-                    
-    return principals
+    return [value for _, value in get_trust_principal_entries(trust_policy)]
 
 def is_admin_policy(policy_doc):
     """

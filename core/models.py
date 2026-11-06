@@ -58,12 +58,18 @@ class GraphNode(models.Model):
         ('ROLE', 'Role'),
         ('GROUP', 'Group'),
         ('POLICY', 'Policy'),
+        ('ACCOUNT_ROOT', 'Account Root'),
+        ('EXTERNAL_ACCOUNT', 'External Account'),
+        ('SERVICE', 'Service'),
+        ('FEDERATED', 'Federated Provider'),
+        ('PUBLIC', 'Public'),
+        ('UNKNOWN', 'Unknown'),
     ]
-    
+
     scan = models.ForeignKey(Scan, on_delete=models.CASCADE, related_name='nodes')
-    node_id = models.CharField(max_length=255)  # Unique ID for the graph
+    node_id = models.CharField(max_length=1024)  # Unique ID for the graph (ARN for IAM principals)
     label = models.CharField(max_length=255)    # Display name
-    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     risk_level = models.CharField(max_length=10, default="LOW") 
     # Optional: X/Y positions could be stored here if calculated backend-side, 
     # but usually frontend handles layout.
@@ -76,8 +82,8 @@ class GraphEdge(models.Model):
     Represents a relationship (Edge) between two nodes.
     """
     scan = models.ForeignKey(Scan, on_delete=models.CASCADE, related_name='edges')
-    source = models.CharField(max_length=255) # matches GraphNode.node_id
-    target = models.CharField(max_length=255) # matches GraphNode.node_id
+    source = models.CharField(max_length=1024) # matches GraphNode.node_id
+    target = models.CharField(max_length=1024) # matches GraphNode.node_id
     label = models.CharField(max_length=100)  # e.g., "CAN_ASSUME", "HAS_POLICY"
 
     def __str__(self):
