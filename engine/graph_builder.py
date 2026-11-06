@@ -26,8 +26,11 @@ class IAMGraph:
             self.graph.add_node(node_id, label=label, type=type, risk=risk)
             self.existing_nodes.add(node_id)
 
-    def add_edge(self, source, target, label):
-        """Adds a relationship."""
+    def add_edge(self, source, target, label, technique=None):
+        """
+        Adds a relationship. A node pair can hold several relationships
+        (e.g. CAN_ASSUME and CAN_PASS_ROLE), kept as a list of (label, technique).
+        """
         # Ensure both nodes exist before adding edge to avoid errors
         if source not in self.existing_nodes:
             self.add_node(source, label=source, type="UNKNOWN", risk="LOW")
@@ -35,7 +38,11 @@ class IAMGraph:
         if target not in self.existing_nodes:
             self.add_node(target, label=target, type="UNKNOWN", risk="LOW")
 
-        self.graph.add_edge(source, target, label=label)
+        if not self.graph.has_edge(source, target):
+            self.graph.add_edge(source, target, relations=[])
+        relations = self.graph.edges[source, target]['relations']
+        if (label, technique) not in relations:
+            relations.append((label, technique))
 
     def build_from_data(self, users, roles, account_id, engine=None):
         """
@@ -143,10 +150,11 @@ class IAMGraph:
 
         edges = []
         for u, v, data in self.graph.edges(data=True):
-            edges.append({
-                "source": u,
-                "target": v,
-                "label": data.get("label", "RELATED")
-            })
+            for label, technique in data.get("relations", []):
+                edges.append({
+                    "source": u,
+                    "target": v,
+                    "label": f"{label} ({technique})" if technique else label
+                })
 
         return nodes, edges

@@ -173,15 +173,17 @@ def run_full_scan(access_key, secret_key, session_token=None):
         print(f"Notification Error: {e}")
     return scan
 
-def create_finding(scan_obj, rule_id, resource_name):
+def create_finding(scan_obj, rule_id, resource_name, description=None, details=None):
     rule = risk_rules.RISK_RULES.get(rule_id)
     if not rule: return None
     return Finding(
         scan=scan_obj,
+        rule_id=rule_id,
         category=rule['category'],
         title=rule['title'],
-        description=rule['description'],
+        description=description or rule['description'],
         severity=rule['severity'],
         affected_resource=resource_name,
-        remediation=rule['remediation']
+        remediation=rule['remediation'],
+        details=details or {}
     )

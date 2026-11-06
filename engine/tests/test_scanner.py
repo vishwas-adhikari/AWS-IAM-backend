@@ -7,6 +7,7 @@ from botocore.stub import Stubber
 from django.test import TestCase
 
 from core.models import Finding, GraphNode
+from core.serializers import ScanSerializer
 from engine import aws_wrapper, scanner
 from engine.tests.helpers import ADMIN_ARN, account_data, allow, deny, doc, group, role, trust, user
 
@@ -99,6 +100,26 @@ class GraphRiskTests(TestCase):
         self.assertEqual(risk["arn:aws:iam::111111111111:role/admin"], "LOW")
         self.assertEqual(risk["arn:aws:iam::111111111111:role/public"], "CRITICAL")
         self.assertEqual(risk["*"], "CRITICAL")
+
+
+class FindingFieldsTests(TestCase):
+    def test_rule_id_and_details_are_saved_and_serialized(self):
+        data = account_data(users=[user("admin", managed=[ADMIN_ARN])], credential_report=[report_row("admin", True)])
+        with mock.patch.object(scanner.aws_wrapper, "fetch_account_data", return_value=data), \
+             mock.patch.object(scanner.notifier, "send_telegram_report"):
+            scan = scanner.run_full_scan("key", "secret")
+
+        finding = Finding.objects.get(scan=scan, affected_resource="admin")
+        self.assertEqual(finding.rule_id, "ADMIN_ACCESS")
+        self.assertEqual(finding.details, {})
+
+        serialized = ScanSerializer(scan).data["findings"][0]
+        self.assertEqual(serialized["rule_id"], "ADMIN_ACCESS")
+        self.assertEqual(serialized["details"], {})
+
+    def test_create_finding_overrides(self):
+        finding = scanner.create_finding(None, "ADMIN_ACCESS", "x", description="custom", details={"k": [1]})
+        self.assertEqual((finding.description, finding.details), ("custom", {"k": [1]}))
 
 
 class FetchMfaDevicesTests(TestCase):

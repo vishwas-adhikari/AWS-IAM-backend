@@ -167,7 +167,8 @@ class Principal:
     """A user or role together with its full effective statement list."""
 
     def __init__(self, kind, name, arn, statements, unresolved_policies):
-        self.kind = kind  # 'user' | 'role'
+        self.kind = kind  # 'user' | 'role' | 'group'
+        self.attached_policy_arns = []  # managed policies, incl. those inherited from groups
         self.name = name
         self.arn = arn
         self.statements = statements
@@ -193,6 +194,9 @@ class PolicyEngine:
             self._add(self._build_user(user))
         for role in data.get('roles', []):
             self._add(self._build_role(role))
+
+        # Groups aren't principals, but evaluating them answers "what does joining this group grant?"
+        self.group_principals = {name: self._build_group(g) for name, g in self.groups.items()}
 
     def _add(self, principal):
         self.principals[principal.arn] = principal
@@ -223,6 +227,7 @@ class PolicyEngine:
 
     def _build_user(self, user):
         unresolved = []
+        attached = list(user.get('AttachedManagedPolicies', []))
         statements = self._inline_statements(user.get('UserPolicyList', []), "inline")
         statements += self._managed_statements(user.get('AttachedManagedPolicies', []), unresolved)
 
@@ -230,16 +235,29 @@ class PolicyEngine:
             group = self.groups.get(group_name)
             if not group:
                 continue
+            attached += group.get('AttachedManagedPolicies', [])
             statements += self._inline_statements(group.get('GroupPolicyList', []), f"group:{group_name}:inline")
             statements += self._managed_statements(group.get('AttachedManagedPolicies', []), unresolved)
 
-        return Principal('user', user['UserName'], user.get('Arn', f"user/{user['UserName']}"), statements, unresolved)
+        p = Principal('user', user['UserName'], user.get('Arn', f"user/{user['UserName']}"), statements, unresolved)
+        p.attached_policy_arns = sorted({a['PolicyArn'] for a in attached})
+        return p
 
     def _build_role(self, role):
         unresolved = []
         statements = self._inline_statements(role.get('RolePolicyList', []), "inline")
         statements += self._managed_statements(role.get('AttachedManagedPolicies', []), unresolved)
-        return Principal('role', role['RoleName'], role.get('Arn', f"role/{role['RoleName']}"), statements, unresolved)
+        p = Principal('role', role['RoleName'], role.get('Arn', f"role/{role['RoleName']}"), statements, unresolved)
+        p.attached_policy_arns = sorted({a['PolicyArn'] for a in role.get('AttachedManagedPolicies', [])})
+        return p
+
+    def _build_group(self, group):
+        unresolved = []
+        statements = self._inline_statements(group.get('GroupPolicyList', []), "inline")
+        statements += self._managed_statements(group.get('AttachedManagedPolicies', []), unresolved)
+        p = Principal('group', group['GroupName'], group.get('Arn', f"group/{group['GroupName']}"), statements, unresolved)
+        p.attached_policy_arns = sorted({a['PolicyArn'] for a in group.get('AttachedManagedPolicies', [])})
+        return p
 
     # -- lookup --
 

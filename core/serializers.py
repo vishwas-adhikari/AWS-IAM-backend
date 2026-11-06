@@ -4,7 +4,7 @@ from .models import Scan, Finding, GraphNode, GraphEdge
 class FindingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Finding
-        fields = ['id', 'category', 'title', 'description', 'severity', 'affected_resource', 'remediation']
+        fields = ['id', 'rule_id', 'category', 'title', 'description', 'severity', 'affected_resource', 'remediation', 'details']
 
 class GraphNodeSerializer(serializers.ModelSerializer):
     class Meta:

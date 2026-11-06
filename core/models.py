@@ -38,12 +38,14 @@ class Finding(models.Model):
     ]
 
     scan = models.ForeignKey(Scan, on_delete=models.CASCADE, related_name='findings')
+    rule_id = models.CharField(max_length=50, blank=True, default="")  # key in engine.risk_rules.RISK_RULES
     category = models.CharField(max_length=100)  # e.g., "Privilege Escalation", "Misconfiguration"
     title = models.CharField(max_length=255)
     description = models.TextField()
     severity = models.CharField(max_length=10, choices=SEVERITY_CHOICES)
     affected_resource = models.CharField(max_length=255)  # e.g., "user-dave"
     remediation = models.TextField(help_text="Steps to fix this issue")
+    details = models.JSONField(default=dict, blank=True)  # rule-specific structured data, e.g. path hops
 
     def __str__(self):
         return f"[{self.severity}] {self.title} - {self.affected_resource}"
