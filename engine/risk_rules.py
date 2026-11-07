@@ -18,8 +18,8 @@ RISK_RULES = {
         "title": "Privilege Escalation Path",
         "severity": "CRITICAL",
         "category": "Privilege Escalation",
-        "description": "A low-privilege identity can assume a high-privilege role to indirectly gain Admin access.",
-        "remediation": "Remove sts:AssumeRole permissions from the starting user or add restrictive Conditions to the target role's Trust Policy."
+        "description": "A non-admin identity can reach full admin through a chain of IAM permissions (assuming roles, self-granting policies, taking over users, rewriting trust policies or passing roles to compute).",
+        "remediation": "Break the chain at its weakest hop: remove or scope the permission on that edge (e.g. restrict sts:AssumeRole, iam:PassRole or IAM write actions to specific ARNs), or add Conditions / a permission boundary."
     },
     # NEW: Root Usage
     "ROOT_USAGE": {
@@ -45,14 +45,6 @@ RISK_RULES = {
         "category": "Security Hygiene",
         "description": "User has Administrator privileges but Multi-Factor Authentication (MFA) is not enabled.",
         "remediation": "Enable MFA immediately. Enforce MFA via IAM Policy Condition 'aws:MultiFactorAuthPresent'."
-    },
-    # NEW: Dangerous IAM Actions
-    "PRIV_ESC_ACTIONS": {
-        "title": "Dangerous IAM Write Actions",
-        "severity": "HIGH",
-        "category": "Privilege Escalation",
-        "description": "User can create or attach policies (iam:CreatePolicy, iam:AttachUserPolicy). This allows them to grant themselves Admin rights.",
-        "remediation": "Restrict these actions to specific Administrators only."
     },
     # NEW: Old Keys
     "LONG_LIVED_KEYS": {

@@ -72,11 +72,11 @@ class ScannerPermissionTests(TestCase):
         self.assertEqual(sorted(findings), sorted([
             ("grp_admin", "Full Administrator Access"),
             ("narrow_deny_admin", "Full Administrator Access"),
-            # Not admin (can't remove its Deny), but still holds the other risky IAM actions.
+            # Not admin (can't remove its Deny), but iam:AttachUserPolicy on itself is a path back to admin.
             # No "Broad Wildcard" finding: that rule is for service-wide grants like s3:*, not "*".
-            ("locked_admin", "Dangerous IAM Write Actions"),
+            ("locked_admin", "Privilege Escalation Path"),
             ("locked_admin", "PassRole to Any Resource"),
-            ("ops", "Dangerous IAM Write Actions"),
+            ("ops", "Privilege Escalation Path"),
             ("s3", "Broad Wildcard Permissions"),
             ("s3", "PassRole to Any Resource"),
             ("r_admin", "Full Administrator Access"),
@@ -133,3 +133,38 @@ class FetchMfaDevicesTests(TestCase):
             stub.add_client_error("list_mfa_devices", "AccessDenied", expected_params={"UserName": "denied"})
             result = aws_wrapper.fetch_mfa_devices(iam, ["none", "one", "denied"])
         self.assertEqual(result, {"none": [], "one": ["arn:aws:iam::111111111111:mfa/one"], "denied": None})
+
+
+class PrivilegeEscalationFindingTests(TestCase):
+    def scan(self, data):
+        with mock.patch.object(scanner.aws_wrapper, "fetch_account_data", return_value=data), \
+             mock.patch.object(scanner.notifier, "send_telegram_report"):
+            return scanner.run_full_scan()
+
+    def test_path_is_saved_with_hops(self):
+        data = account_data(
+            users=[user("Intern-Dave")],
+            roles=[role("Maintenance-Role", managed=[ADMIN_ARN],
+                        trust_policy=trust({"AWS": "arn:aws:iam::111111111111:user/Intern-Dave"}))],
+        )
+        scan = self.scan(data)
+
+        finding = Finding.objects.get(scan=scan, rule_id="PRIVILEGE_ESCALATION")
+        self.assertEqual(finding.affected_resource, "Intern-Dave")
+        self.assertEqual(finding.description, "Path to admin: Intern-Dave -> Maintenance-Role [CAN_ASSUME]")
+        self.assertEqual([h["to"] for h in finding.details["hops"]],
+                         ["arn:aws:iam::111111111111:role/Maintenance-Role"])
+
+    def test_every_node_on_a_path_is_critical(self):
+        acct = "arn:aws:iam::111111111111"
+        data = account_data(
+            users=[user("dev"), user("boss", managed=[ADMIN_ARN]), user("bystander")],
+            roles=[role("ci", inline=[doc(allow("iam:CreateAccessKey", f"{acct}:user/boss"))],
+                        trust_policy=trust({"AWS": f"{acct}:user/dev"}))],
+            credential_report=[report_row("boss", True)],
+        )
+        scan = self.scan(data)
+        risk = dict(GraphNode.objects.filter(scan=scan).values_list("node_id", "risk_level"))
+        for name in ("user/dev", "role/ci", "user/boss"):
+            self.assertEqual(risk[f"{acct}:{name}"], "CRITICAL", name)
+        self.assertEqual(risk[f"{acct}:user/bystander"], "LOW")

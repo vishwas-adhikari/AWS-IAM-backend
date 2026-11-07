@@ -65,6 +65,7 @@ class GraphNode(models.Model):
         ('SERVICE', 'Service'),
         ('FEDERATED', 'Federated Provider'),
         ('PUBLIC', 'Public'),
+        ('ADMIN', 'Account Admin'),
         ('UNKNOWN', 'Unknown'),
     ]
 

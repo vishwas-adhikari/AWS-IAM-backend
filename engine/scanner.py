@@ -1,9 +1,7 @@
-from engine import aws_wrapper, iam_normalize, graph_builder, risk_rules,remediation, notifier, policy_engine
+from engine import aws_wrapper, iam_normalize, graph_builder, risk_rules, notifier, policy_engine, privesc
 from core.models import Scan, Finding, GraphNode, GraphEdge
 from django.utils import timezone
 from datetime import datetime, timedelta, timezone as dt_timezone
-
-PRIV_ESC_ACTIONS = ['iam:CreatePolicy', 'iam:AttachUserPolicy', 'iam:PutUserPolicy', 'iam:CreateAccessKey']
 
 def run_full_scan(profile=None):
     # 1. Fetch Data
@@ -22,12 +20,12 @@ def run_full_scan(profile=None):
     seen_findings = set()  # (rule_id, node) - one finding per pair
     finding_nodes = []     # (finding, graph node_id) - for colouring the graph
 
-    def add_finding(rule_id, resource_name, node_id=None):
+    def add_finding(rule_id, resource_name, node_id=None, description=None, details=None):
         key = (rule_id, node_id or resource_name)
         if key in seen_findings:
             return
         seen_findings.add(key)
-        finding = create_finding(scan, rule_id, resource_name)
+        finding = create_finding(scan, rule_id, resource_name, description, details)
         findings_list.append(finding)
         if node_id:
             finding_nodes.append((finding, node_id))
@@ -43,15 +41,13 @@ def run_full_scan(profile=None):
 
         risks_found = []
 
-        # 2. HIGH: Dangerous IAM Write Actions (even when scoped, e.g. to their own user)
-        if any(engine.allows_on_any_resource(principal, a) for a in PRIV_ESC_ACTIONS):
-            risks_found.append("PRIV_ESC_ACTIONS")
+        # (Dangerous IAM write actions are reported as PRIVILEGE_ESCALATION paths, see engine/privesc.py)
 
-        # 3. HIGH: Service-wide wildcards on all resources
+        # 2. HIGH: Service-wide wildcards on all resources
         if engine.service_wildcards(principal):
             risks_found.append("WILDCARD_PERMISSION")
 
-        # 4. MEDIUM: PassRole on any role
+        # 3. MEDIUM: PassRole on any role
         if engine.allows(principal, 'iam:PassRole', '*'):
             risks_found.append("PASSROLE_ANY")
 
@@ -85,15 +81,6 @@ def run_full_scan(profile=None):
         user_name = user['UserName']
         user_arn = engine.get(user).arn
 
-        # Check Keys Age
-        for key in user.get('AccessKeyMetadata', []): # Boto3 usually returns this separately, but AuthorizationDetails includes it inside UserDetailList sometimes? 
-        # Actually, get_account_authorization_details structure for keys is inside 'UserPolicyList'? No.
-        # It's usually in a separate call or part of UserDetail. Let's assume standard UserDetail structure.
-        # Standard UserDetail doesn't always have Key creation date easily. 
-        # For this MVP, we will rely on 'CreateDate' of the user as a proxy if keys aren't listed, 
-        # OR better: Skip key check if data isn't present to avoid crashing.
-            pass 
-
         # 1. Check Permissions (inline + managed + group policies combined)
         all_risks = check_principal_risk(user)
         user_is_admin = "ADMIN_ACCESS" in all_risks
@@ -104,11 +91,6 @@ def run_full_scan(profile=None):
         # 2. Check MFA for Admins (skipped when MFA status couldn't be determined)
         if user_is_admin and user_has_mfa(user_name) is False:
             add_finding("NO_MFA_ADMIN", user_name, user_arn)
-
-        # 3. Check Root Usage (If this user object is actually the root account summary, which sometimes happens in reports)
-        if user_name == '<root_account>': 
-             # Logic usually requires Credential Report. Skipping for simple MVP to avoid complexity.
-             pass
 
     # C. Check Roles
     for role in data['roles']:
@@ -128,6 +110,19 @@ def run_full_scan(profile=None):
     # D. Build Graph
     graph_engine = graph_builder.IAMGraph()
     graph_engine.build_from_data(data['users'], data['roles'], data['account_id'], engine)
+
+    # E. Privilege-escalation edges + shortest paths to admin
+    path_nodes = set()  # every node on any path is marked CRITICAL in the graph
+    for path in privesc.analyze(graph_engine, engine, data):
+        add_finding(
+            "PRIVILEGE_ESCALATION", path['source_label'], path['source'],
+            description=f"Path to admin: {privesc.describe(path)}",
+            details={"target": path['target'], "hops": path['hops']},
+        )
+        path_nodes.add(path['source'])
+        for hop in path['hops']:
+            path_nodes.update((hop['from'], hop['to']))
+
     nodes, edges = graph_engine.get_nodes_and_edges()
 
     # --- MAP RISKS TO NODES ---
@@ -136,6 +131,8 @@ def run_full_scan(profile=None):
     for f, node_id in finding_nodes:
         if risk_rank.get(f.severity, 0) > risk_rank[risk_map.get(node_id, "LOW")]:
             risk_map[node_id] = f.severity
+    for node_id in path_nodes:
+        risk_map[node_id] = "CRITICAL"
 
     # --- SAVING ---
     Finding.objects.bulk_create(findings_list)
